@@ -404,6 +404,13 @@ Before processing files, diagnose what's wrong:
 .\parent_process.ps1 -InputFile "E:\Movies\BigMovie.mkv" -OrigFile "E:\Movies\BigMovie.mkv"
 ```
 
+**IMPORTANT:** Input files must be in MKV format. Other container formats (MP4, AVI, TS, etc.) may not work correctly and could cause unexpected errors. If your source file is not MKV, remux it first:
+
+```powershell
+# Quick remux to MKV (no re-encoding)
+ffmpeg -i "input.mp4" -c copy "output.mkv"
+```
+
 The parent script will:
 1. Run the main script
 2. Check quality validation results
@@ -423,6 +430,8 @@ The parent script will:
     -QualityThreshold 35.0 `
     -EnableSoftwareFallback
 ```
+
+**IMPORTANT:** Both `-InputFile` and `-OrigFile` must be MKV format. The script is optimized for Matroska containers and may fail with other formats.
 
 ### Key Parameters Explained
 
@@ -478,6 +487,19 @@ The diagnostic will tell you:
 - If the container is corrupted
 - If subtitles have wrong flags
 - Specific recommendations for each issue
+
+### "Script fails with MP4/AVI/TS files"
+
+**Problem**: The conversion script only supports MKV input files
+
+**Solution**: Remux to MKV first (fast, no re-encoding):
+```powershell
+ffmpeg -i "input.mp4" -c copy -map 0 "output.mkv"
+ffmpeg -i "input.avi" -c copy -map 0 "output.mkv"
+ffmpeg -i "input.ts" -c copy -map 0 "output.mkv"
+```
+
+Then run the conversion script on the MKV file. The diagnostic script (`Get-PlexVideoInfo.ps1`) works with any format and will recommend remuxing if needed.
 
 ### "QSV initialization failed"
 
@@ -536,15 +558,17 @@ The diagnostic will tell you:
 
 ### New to Video Processing?
 1. **Start with diagnostics** - Run `Get-PlexVideoInfo.ps1` on problematic files
-2. **Understand the issues** - Read the report's recommendations carefully
-3. **Simple fixes first** - If report suggests remux, try that before full conversion
-4. **Full conversion** - Use main scripts for complex issues (Dolby Vision, HDR10+, audio problems)
+2. **Check container format** - If not MKV, remux first: `ffmpeg -i input.mp4 -c copy output.mkv`
+3. **Understand the issues** - Read the report's recommendations carefully
+4. **Simple fixes first** - If report suggests remux, try that before full conversion
+5. **Full conversion** - Use main scripts for complex issues (Dolby Vision, HDR10+, audio problems)
 
 ### Batch Processing Setup?
 1. **Test one file first** - Ensure configuration is correct
-2. **Check diagnostic on sample** - Understand what issues exist in your library
-3. **Set up MCEBuddy** - For automated processing of new content
-4. **Monitor initial runs** - Watch logs for any unexpected issues
+2. **Remux non-MKV files** - Convert all source files to MKV before processing
+3. **Check diagnostic on sample** - Understand what issues exist in your library
+4. **Set up MCEBuddy** - For automated processing of new content (configure to output MKV)
+5. **Monitor initial runs** - Watch logs for any unexpected issues
 
 ### Troubleshooting Workflow?
 1. **Run diagnostic** - Get comprehensive report: `.\Get-PlexVideoInfo.ps1 -InputFile "file.mkv" -OutputFile "report.txt"`
@@ -561,6 +585,7 @@ The diagnostic will tell you:
 - Need detailed technical report
 - Troubleshooting specific playback issues
 - Checking batch of files for problems
+- **Works with ANY video format** (MP4, AVI, MKV, TS, etc.)
 
 **Use `Get-PlexServerStatus.ps1` when:**
 - Need to check if Plex server is active
@@ -575,12 +600,14 @@ The diagnostic will tell you:
 - Audio/subtitle format conversion needed
 - Want Plex-optimized output with quality validation
 - Automated processing (via MCEBuddy)
+- **REQUIRES MKV INPUT** - Remux other formats to MKV first
 
 **Use simple FFmpeg remux when:**
 - Diagnostic shows only minor container issues
 - No codec/audio/subtitle problems
 - Just need quick container fix
-- Command: `ffmpeg -i input.mkv -c copy -map 0 output.mkv`
+- Converting non-MKV files to MKV for processing
+- Command: `ffmpeg -i input.mp4 -c copy -map 0 output.mkv`
 
 ### "No audio stream selected"
 
