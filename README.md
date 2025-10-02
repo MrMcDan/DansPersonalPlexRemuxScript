@@ -8,10 +8,35 @@ Congratulations! You've stumbled upon what happens when someone asks "what if we
 
 ## What Fresh Hell Is This?
 
-This repository contains two PowerShell scripts that have collectively seen things no script should see:
+This repository contains PowerShell scripts that have collectively seen things no script should see:
+
+### Core Processing Scripts
 
 1. **`convertHdr10+ToAV1.ps1`** (6,247 lines of "surely we don't need MORE error handling")
+   - The main video processing workhorse
+   - Handles encoding, HDR10+ processing, audio/subtitle manipulation
+   - Direct hardware acceleration via Intel QuickSync
+
 2. **`parent_process.ps1`** (The sane wrapper that knows when to give up)
+   - Intelligent retry logic with quality adjustment
+   - Validates encoding results
+   - Gives up after 3 failed attempts (rare, but graceful)
+
+### Diagnostic & Utility Scripts
+
+3. **`Get-PlexVideoInfo.ps1`** (The Video Detective)
+   - Comprehensive video file analyzer for diagnosing Plex playback issues
+   - Checks codecs, HDR/Dolby Vision, container integrity, GOP structure
+   - Identifies problematic audio/subtitle formats
+   - Provides specific recommendations for fixing detected issues
+   - **Usage:** `.\Get-PlexVideoInfo.ps1 -InputFile "movie.mkv" -OutputFile "report.txt"`
+   - Perfect for troubleshooting "why won't this play?" scenarios
+
+4. **`Get-PlexServerStatus.ps1`** (The Server Watcher)
+   - Monitors Plex server status and activity
+   - Checks if MCEBuddy or other processes are running
+   - Useful for coordinating multiple automation tasks
+   - **Usage:** `.\Get-PlexServerStatus.ps1`
 
 ### Features (Yes, ALL of Them)
 
@@ -136,6 +161,26 @@ If this errors, go install the packages. If it says "python not found," add Pyth
 Expected output: Something with "hevc_qsv" in it.
 
 If you see nothing: You downloaded the wrong FFmpeg build. Go back. Get the full build with --enable-libvpl or equivalent. QSV is the whole point of this script's speed.
+
+## Diagnostic Tools Setup (Optional but Recommended)
+
+The diagnostic scripts (`Get-PlexVideoInfo.ps1` and `Get-PlexServerStatus.ps1`) only require FFmpeg - no additional setup needed beyond Step 2 above.
+
+**Quick Start for Diagnostics:**
+```powershell
+# Check if a file has Plex compatibility issues
+.\Get-PlexVideoInfo.ps1 -InputFile "C:\Movies\Problem_Movie.mkv"
+
+# Save detailed report to file
+.\Get-PlexVideoInfo.ps1 -InputFile "C:\Movies\Problem_Movie.mkv" -OutputFile "C:\report.txt"
+
+# Check Plex server and processing status
+.\Get-PlexServerStatus.ps1
+```
+
+The diagnostic tools will tell you exactly what's wrong with a file and recommend either:
+- Simple fixes (remux with FFmpeg)
+- Running through the full conversion script for complex issues (Dolby Vision, HDR10+, problematic audio/subtitles)
 
 ## MCEBuddy Integration (The "Set It and Forget It" Approach)
 
@@ -330,6 +375,29 @@ With MCEBuddy integration:
 
 ## Usage (Simple on the Surface)
 
+### Diagnostic Mode (Start Here If You Have Problems)
+
+Before processing files, diagnose what's wrong:
+
+```powershell
+# Full diagnostic report with recommendations
+.\Get-PlexVideoInfo.ps1 -InputFile "E:\Movies\Problem_Movie.mkv"
+
+# Save report to file for reference
+.\Get-PlexVideoInfo.ps1 -InputFile "E:\Movies\Problem_Movie.mkv" -OutputFile "E:\report.txt"
+```
+
+**What it checks:**
+- Container format issues (AVI, WMV, corruption)
+- Video codec compatibility (Dolby Vision, VC-1, interlacing)
+- HDR/HDR10+ detection and validation
+- Audio codec issues (TrueHD, DTS, PCM)
+- Subtitle format problems (PGS, forced flags)
+- GOP structure and frame analysis
+- Container integrity errors
+
+**Output includes:** Specific recommendations for each issue found, including whether to use the full conversion script or just a simple remux.
+
 ### Basic Usage (The Wrapper Does Everything)
 
 ```powershell
@@ -397,6 +465,20 @@ The script outputs detailed progress including:
 
 ## Common Issues (And Why They Happen)
 
+### "How do I know if I need to process this file?"
+
+**Solution**: Run the diagnostic first!
+```powershell
+.\Get-PlexVideoInfo.ps1 -InputFile "your_movie.mkv"
+```
+
+The diagnostic will tell you:
+- If the file has Dolby Vision (major issue)
+- If audio codecs are incompatible (TrueHD, DTS)
+- If the container is corrupted
+- If subtitles have wrong flags
+- Specific recommendations for each issue
+
 ### "QSV initialization failed"
 
 **Problem**: Intel drivers are outdated or iGPU is disabled in BIOS
@@ -431,6 +513,74 @@ The script outputs detailed progress including:
 2. **Software fallback activated**: libx265 is slow (40-60 fps vs 300+ fps for QSV)
 3. **4K HDR10+ content**: Just... grab coffee. Lots of coffee.
 4. **Quality validation enabled**: PSNR/SSIM calculation is CPU-intensive
+
+### "No audio stream selected"
+
+**Problem**: All audio streams failed validation (corruption, wrong language, duration mismatch)
+
+**Solution**: 
+1. Run diagnostic: `.\Get-PlexVideoInfo.ps1 -InputFile "file.mkv"`
+2. Check audio stream details in the report
+3. Verify with MediaInfo for additional details
+4. Script is picky for good reasons - corrupted audio will cause playback issues
+
+### "File won't play in Plex but passes all tests"
+
+**Solution**: 
+1. Run full diagnostic to identify subtle issues
+2. Check Plex server logs for specific errors
+3. Test playback on different clients (issue may be client-specific)
+4. Consider running through conversion script even if diagnostic shows minor issues
+
+## Workflow Recommendations
+
+### New to Video Processing?
+1. **Start with diagnostics** - Run `Get-PlexVideoInfo.ps1` on problematic files
+2. **Understand the issues** - Read the report's recommendations carefully
+3. **Simple fixes first** - If report suggests remux, try that before full conversion
+4. **Full conversion** - Use main scripts for complex issues (Dolby Vision, HDR10+, audio problems)
+
+### Batch Processing Setup?
+1. **Test one file first** - Ensure configuration is correct
+2. **Check diagnostic on sample** - Understand what issues exist in your library
+3. **Set up MCEBuddy** - For automated processing of new content
+4. **Monitor initial runs** - Watch logs for any unexpected issues
+
+### Troubleshooting Workflow?
+1. **Run diagnostic** - Get comprehensive report: `.\Get-PlexVideoInfo.ps1 -InputFile "file.mkv" -OutputFile "report.txt"`
+2. **Review recommendations** - Report tells you exactly what's wrong
+3. **Apply fixes** - Follow script recommendations (remux vs full conversion)
+4. **Re-test** - Run diagnostic again on output file to confirm fixes
+5. **Test in Plex** - Verify playback on your specific client setup
+
+## Script Selection Guide
+
+**Use `Get-PlexVideoInfo.ps1` when:**
+- File won't play in Plex (diagnostic mode)
+- Want to check file before processing
+- Need detailed technical report
+- Troubleshooting specific playback issues
+- Checking batch of files for problems
+
+**Use `Get-PlexServerStatus.ps1` when:**
+- Need to check if Plex server is active
+- Checking if MCEBuddy is currently processing
+- Coordinating multiple automation tasks
+- Monitoring server activity before starting encodes
+
+**Use `parent_process.ps1` / `convertHdr10+ToAV1.ps1` when:**
+- Diagnostic identified issues needing conversion
+- Dolby Vision needs removal
+- HDR10+ processing required
+- Audio/subtitle format conversion needed
+- Want Plex-optimized output with quality validation
+- Automated processing (via MCEBuddy)
+
+**Use simple FFmpeg remux when:**
+- Diagnostic shows only minor container issues
+- No codec/audio/subtitle problems
+- Just need quick container fix
+- Command: `ffmpeg -i input.mkv -c copy -map 0 output.mkv`
 
 ### "No audio stream selected"
 
