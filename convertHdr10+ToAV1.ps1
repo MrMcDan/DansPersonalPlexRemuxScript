@@ -6764,16 +6764,17 @@ $encodeArgs = @(
     "-preset", "veryslow",
     "-profile:v", $lprofile,
     "-global_quality", $av1Quality,
+    "-extbrc", "1",  # NEW: Required for look_ahead
     "-look_ahead_depth", [math]::Min(100, $EncodingSettings.LookAhead),
     "-adaptive_i", "1",
     "-adaptive_b", "1",
     "-b_strategy", "1",
     "-async_depth", "4",
-    "-aq_mode", "2",
+    "-max_frame_size", $EncodingSettings.MaxFrameSize,  # NEW: Frame size control
     "-g", $keyframeInterval,
     "-keyint_min", $keyframeInterval,
     "-bf", "7",
-    "-refs", "7",
+    "-refs", "7",  # May want to reduce to 4-5 for compatibility
     "-r", $VideoInfo.FrameRate,
     "-pix_fmt", $pixelFormat,
     "-f", $outputFormat
@@ -9239,8 +9240,15 @@ $encodeArgs = @(
     "-aq_mode", "2",
     "-b_strategy", "1",
     "-async_depth", "4",
-    "-rdo", "1",
+    "-rdo", "1",  # NEW: Critical for quality
+    "-transform_skip", "1",  # NEW: Preserves fine details
     "-max_frame_size", $EncodingSettings.MaxFrameSize,
+    "-min_qp_i", "15",  # NEW: QP range control
+    "-max_qp_i", "35",
+    "-min_qp_p", "17",
+    "-max_qp_p", "37",
+    "-min_qp_b", "19",
+    "-max_qp_b", "39",
     "-g", $keyframeInterval,
     "-keyint_min", $keyframeInterval,
     "-bf", "5",
@@ -10487,27 +10495,27 @@ try {
     
     Update-BackupProgress -ProcessingStep "early DV removal"
     
-# STEP 1B: Process HDR10+ metadata (simplified - no redundant detection/extraction)
+# STEP 1B: Process HDR10+ metadata (simplified - use cached results)
 Write-Host "`n=== HDR10+ Metadata Processing ===" -ForegroundColor Cyan
 
-# Use the already-detected HDR10+ status from initial analysis
+# Use the already-detected and extracted HDR10+ status from initial analysis
 $hdr10PlusJson = $null
 $hasHdr10Plus = $false
 
 if ($Script:HDR10PlusStatus.HasHDR10Plus) {
     Write-Host "HDR10+ detected during initial analysis" -ForegroundColor Green
     
+    # Use the already extracted metadata
     if ($Script:HDR10PlusStatus.ExtractedJsonPath -and (Test-Path $Script:HDR10PlusStatus.ExtractedJsonPath)) {
-        # Use the already extracted metadata
         $hdr10PlusJson = $Script:HDR10PlusStatus.ExtractedJsonPath
         $hasHdr10Plus = $Script:HDR10PlusStatus.IsViable
         
         if ($hasHdr10Plus) {
             Write-Host "Using extracted HDR10+ metadata: $($Script:HDR10PlusStatus.SceneCount) scenes" -ForegroundColor Green
-            Write-Host "Metadata quality: $(if ($Script:HDR10PlusStatus.IsViable) { 'VIABLE' } else { 'NEEDS REPAIR' })" -ForegroundColor $(if ($Script:HDR10PlusStatus.IsViable) { 'Green' } else { 'Yellow' })
+            Write-Host "Metadata quality: VIABLE" -ForegroundColor Green
         }
         else {
-            Write-Warning "HDR10+ metadata quality too poor - attempting repair..."
+            Write-Warning "HDR10+ metadata quality assessment failed - attempting repair..."
             
             # Try to repair the metadata
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($processedFile)
@@ -10529,35 +10537,9 @@ if ($Script:HDR10PlusStatus.HasHDR10Plus) {
     }
     else {
         # This shouldn't happen if Initialize-VideoAnalysisWithHDR10Plus worked correctly
-        Write-Warning "HDR10+ was detected but metadata file is missing - attempting extraction"
-        
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($processedFile)
-        $hdr10PlusJson = New-TempFile -BaseName "$baseName.hdr10plus.fallback" -Extension ".json"
-        
-        # Try extraction from processed file first
-        $extractSuccess = Invoke-HDR10PlusExtraction -InputFile $processedFile -OutputJson $hdr10PlusJson
-        
-        # If that fails and processed file is different from original, try original
-        if (-not $extractSuccess -and $processedFile -ne $OrigFile) {
-            Write-Warning "Trying original file for HDR10+ extraction..."
-            $extractSuccess = Invoke-HDR10PlusExtraction -InputFile $OrigFile -OutputJson $hdr10PlusJson
-        }
-        
-        if ($extractSuccess) {
-            $Script:HDR10PlusStatus.ExtractedJsonPath = $hdr10PlusJson
-            $hasHdr10Plus = $true
-            
-            # Test viability
-            $shouldSkip = Test-HDR10ProcessingViability -MetadataFilePath $hdr10PlusJson -LogAssessment:$true
-            if ($shouldSkip) {
-                $hasHdr10Plus = $false
-                Write-Warning "Extracted HDR10+ metadata is not viable for processing"
-            }
-        }
-        else {
-            Write-Warning "HDR10+ extraction failed - proceeding without HDR10+"
-            $hasHdr10Plus = $false
-        }
+        Write-Warning "HDR10+ was detected but metadata file is missing - this is unexpected"
+        Write-Warning "Skipping HDR10+ processing to avoid redundant extraction"
+        $hasHdr10Plus = $false
     }
 }
 else {
