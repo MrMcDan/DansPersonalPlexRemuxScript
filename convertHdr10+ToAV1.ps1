@@ -135,6 +135,8 @@ $Script:ValidatedTempFolder = $null
 $Script:ScriptTempFolder = $null
 $script:HEVCDef = 16
 
+
+
 # Add this near the beginning of your script, right after param block
 trap {
     Write-Host "`nCtrl+C detected - performing emergency cleanup..." -ForegroundColor Red
@@ -150,6 +152,28 @@ trap {
     exit 130  # Standard exit code for Ctrl+C
 }
 
+function Find-PythonPath {
+    try {
+        # Get-Command looks in the $env:Path for the executable.
+        $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue 
+        
+        # .Source contains the full path to the executable (e.g., C:\Python39\python.exe)
+        if ($pythonCommand) {
+            $pythonPath = $pythonCommand.Source
+            Write-Host "Found Python executable at: $pythonPath" -ForegroundColor Green
+            return $pythonPath
+        } else {
+            Write-Host "Error: python.exe was not found in the system PATH. Please install Python or add it to your PATH environment variable."
+            # Return an empty string or $null on failure so the script can handle the error.
+            return $null
+        }
+    }
+    catch {
+        Write-Host "Error: python.exe was not found in the system PATH. Please install Python or add it to your PATH environment variable."
+        # Return an empty string or $null on failure so the script can handle the error.
+        return $null
+    }
+}
 
 # Register cleanup handler for script termination
 function Register-CleanupHandler {
@@ -2815,6 +2839,7 @@ else {
     }
     else {
         try {
+            Write-Host "Using $($InputFile)"
             $contentBasedQuality = Get-ContentBasedQuality -InputFile $InputFile -VideoInfo $VideoInfo -BaseQuality $afterResolutionQuality
             $afterContentQuality = [int]($contentBasedQuality | Select-Object -First 1)
             $contentAwareAdjustment = $afterContentQuality - $afterResolutionQuality
@@ -3260,7 +3285,7 @@ function Get-ContentBasedQuality {
             return $BaseQuality
         }
         # Multiple sample points for better accuracy
-        [int]$sampleDuration = 5
+        [int]$sampleDuration = 15
         [double[]]$samplePoints = @()
         
         # Adaptive sampling based on video length
@@ -3307,7 +3332,6 @@ function Get-ContentBasedQuality {
             Write-Host "   Sample at $samplePoint s..." -ForegroundColor DarkGray
             
             $basicAnalysisArgs = @(
-                "-hwaccel", "auto",
                 "-hide_banner",
                 "-v", "quiet", 
                 "-stats",
@@ -3330,8 +3354,8 @@ function Get-ContentBasedQuality {
                         $quotedArgs += $arg
                     }
                 }
-                #$commandLine = $quotedArgs -join ' '
-                #                Write-Host "     [DEBUG] FFmpeg command: $commandLine" -ForegroundColor DarkCyan
+                $commandLine = $quotedArgs -join ' '
+             #                   Write-Host "     [DEBUG] FFmpeg command: $commandLine" -ForegroundColor DarkCyan
                 
                 # Use Start-Process with timeout and corruption detection
                 $processInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -3388,7 +3412,8 @@ function Get-ContentBasedQuality {
                         continue  # Skip this sample point and try the next one
                     }
                     
-                    #                   Write-Host "     [DEBUG] Process completed normally, output length: $($output.Length)" -ForegroundColor DarkGreen
+             #       Write-Host "     [DEBUG] Process completed normally, output length: $($output.Length)" -ForegroundColor DarkGreen
+            #        Write-Host "     [DEBUG] Process completed normally, output : $($output)" -ForegroundColor DarkGreen
                     
                 }
                 else {
@@ -3718,7 +3743,6 @@ function Invoke-SourceQualityAnalysis {
             
             # Extract original sample to YUV
             $originalArgs = @(
-                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -3738,7 +3762,6 @@ function Invoke-SourceQualityAnalysis {
             
             # Create lossless re-encoding of the same sample
             $losslessArgs = @(
-                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -3759,7 +3782,6 @@ function Invoke-SourceQualityAnalysis {
             
             # Extract lossless sample to YUV
             $reencodedArgs = @(
-                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-i", $tempLosslessFile,
                 "-pix_fmt", "yuv420p",
@@ -4171,7 +4193,7 @@ function Get-AdaptiveQualityThresholds {
         return $thresholds
     }
     catch {
-        Write-Error "Failed to calculate adaptive thresholds: $_"
+        Write-Host "Failed to calculate adaptive thresholds: $_"
         Write-Host "Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Red
         
         # Return structure matching expected format with base values
@@ -4383,7 +4405,6 @@ function Invoke-QualityValidation {
             
             # Extract sample from original
             $originalArgs = @(
-                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -4402,7 +4423,6 @@ function Invoke-QualityValidation {
             
             # Extract sample from encoded
             $encodedArgs = @(
-                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -5036,7 +5056,6 @@ function Confirm-AudioStreamUsability {
     try {
         # Build args
         $sampleArgs = @(
-            "-hwaccel", "auto",
             "-hide_banner",
             "-i", $FilePath,
             "-map", "0:a:$($Stream.GlobalIndex)",
@@ -5391,7 +5410,6 @@ function Invoke-SubtitleExtraction {
         # Text-based subtitles: convert to SRT with timing preservation
         Write-Host "Converting text-based subtitle to SRT..." -ForegroundColor Yellow
         $largs = @(
-            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-analyzeduration", "1000000000",
             "-probesize", "5000000000",
@@ -5441,7 +5459,6 @@ function Invoke-SubtitleExtraction {
         Add-TempFile -FilePath $supOutputFile
         
         $largs = @(
-            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-i", $origFile, # $InputFile,
             "-max_muxing_queue_size", "65536",
@@ -5601,7 +5618,6 @@ function Invoke-HDR10PlusExtraction {
         
         # Build FFmpeg arguments for MP4 to MKV conversion (copy all streams)
          $mp4ToMkvArgs = @(
-            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-loglevel", "warning",
             "-i", $InputFile,
@@ -6130,7 +6146,6 @@ function Test-QSVAvailability {
         # Test 2: Check QSV device initialization with better error handling
         Write-Host "  Testing QSV device initialization..." -ForegroundColor Gray 
         $deviceTestArgs = @(
-            "-hwaccel", "auto",
             "-hide_banner",
             "-f", "lavfi", 
             "-i", "testsrc=duration=2:size=640x480:rate=30",
@@ -6275,7 +6290,6 @@ function Invoke-EnhancedHEVCExtraction {
     try {
         # Build FFmpeg arguments for HEVC extraction
         $extractArgs = @(
-            "-hwaccel", "auto",
             "-y", "-hide_banner", 
             "-loglevel", "warning",
             "-err_detect", "explode",           # Fail on any stream errors
@@ -6768,7 +6782,6 @@ $encodeArgs = @(
     # Build complete FFmpeg command
     
     $ffmpegArgs = @(
-        "-hwaccel", "auto",
         "-y", "-hide_banner",
         "-xerror",
         "-loglevel", "info",
@@ -7254,7 +7267,6 @@ function Invoke-EarlyDolbyVisionRemoval {
                                 # Fall back to FFmpeg method
                                 Write-Host "Falling back to FFmpeg re-containerization..." -ForegroundColor Yellow
                                 $remuxArgs = @(
-                                    "-hwaccel", "auto",
                                     "-y", "-hide_banner", "-loglevel", "warning",
                                     "-i", $InputFile,  # Original file for audio/subtitles
                                     "-i", $blFile,     # DV-removed video
@@ -7286,7 +7298,6 @@ function Invoke-EarlyDolbyVisionRemoval {
                             # Fall back to FFmpeg method
                             Write-Host "Falling back to FFmpeg re-containerization..." -ForegroundColor Yellow
                             $remuxArgs = @(
-                                "-hwaccel", "auto",
                                 "-y", "-hide_banner", "-loglevel", "warning",
                                 "-i", $InputFile,  # Original file for audio/subtitles
                                 "-i", $blFile,     # DV-removed video
@@ -7311,7 +7322,6 @@ function Invoke-EarlyDolbyVisionRemoval {
                         # Fall back to FFmpeg method if mkvmerge not available
                         Write-Host "mkvmerge not available - using FFmpeg re-containerization..." -ForegroundColor Yellow
                         $remuxArgs = @(
-                            "-hwaccel", "auto",
                             "-y", "-hide_banner", "-loglevel", "warning",
                             "-i", $InputFile,  # Original file for audio/subtitles
                             "-i", $blFile,     # DV-removed video
@@ -7673,6 +7683,9 @@ function Invoke-PlexOptimizedRemux {
             $OriginalFile
         )
         $containerDurationOutput = & $Config.FFProbeExe @containerDurationArgs 2>$null
+        if ($containerDurationOutput -eq "N/A") {
+            $containerDurationOutput = $null
+        }
         if ($containerDurationOutput) {
             $containerDuration = [double]$containerDurationOutput
         }
@@ -7705,7 +7718,6 @@ function Invoke-PlexOptimizedRemux {
     # Build comprehensive FFmpeg command with all streams
     $largs = @(
         '-y'
-        "-hwaccel", "auto",
         '-hide_banner'
         '-loglevel', 'warning'
     )
@@ -9245,7 +9257,6 @@ $encodeArgs += $containerArgs
 
     $ffmpegArgs = @(
         "-y", "-hide_banner",
-        "-hwaccel", "auto",
         "-xerror", # Exit on any error
         "-loglevel", "info",
         "-fflags", "+genpts",
@@ -9543,7 +9554,6 @@ if ($ColorInfo.IsHDR) {
 
     $ffmpegArgs = @(
         "-y", "-hide_banner",
-        "-hwaccel", "auto",
         "-xerror", # Exit on any error
         "-loglevel", "info",
         "-fflags", "+genpts",
@@ -9862,6 +9872,10 @@ function Test-HDR10MetadataQuality {
     $scenes = $Metadata.SceneInfo
     if (-not $scenes) {
         $assessment.IssuesFound += "No SceneInfo found in metadata"
+        return $assessment
+    }
+    if (-not $Config.pythonExe) {
+        Write-Host "Python not found, skipping cleanup."
         return $assessment
     }
 
@@ -10368,6 +10382,11 @@ function Repair-HDR10Metadata {
 
 try {
     #$LockTimeoutSeconds = 60
+    try {
+        $config.pythonExe = Find-PythonPath
+    } catch {
+         $config.pythonExe = $null
+    }
     Write-Host "=== Enhanced Video Processing Script ===" -ForegroundColor Cyan
     Write-Host "Input: $InputFile" -ForegroundColor White
     Write-Host "Codec target: HEVC" -ForegroundColor White
