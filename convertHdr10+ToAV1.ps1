@@ -609,139 +609,241 @@ function Test-Prerequisites {
     return $true
 }
 
-function Get-RunningScriptInstances {
-    Write-Host "Detecting other running script instances..." -ForegroundColor Gray
+function Test-HDRMetadataValidity {
+    param([hashtable]$Metadata)
     
-    try {
-        $currentPID = $PID
-        $scriptInstances = @()
-        
-        # Method 1: Use a unique temporary marker file approach
-        $scriptName = "convertHdr10+ToAV1"
-        $scriptNameEscaped = [regex]::Escape($scriptName)  # Escape special regex characters
-        $tempMarkerDir = Join-Path $env:TEMP "VideoProcessing_Instances"
-        
-        # Ensure marker directory exists
-        if (-not (Test-Path $tempMarkerDir)) {
-            New-Item -ItemType Directory -Path $tempMarkerDir -Force | Out-Null
-        }
-        
-        # Create our marker file
-        $ourMarkerFile = Join-Path $tempMarkerDir "$scriptName.$currentPID.marker"
-        $currentStartTime = Get-Date
-        @{
-            PID         = $currentPID
-            StartTime   = $currentStartTime
-            ScriptName  = $scriptName
-            MachineName = $env:COMPUTERNAME
-        } | ConvertTo-Json | Out-File -FilePath $ourMarkerFile -Force
-        
-        Write-Host "Created instance marker: $ourMarkerFile" -ForegroundColor Green
-        
-        # Method 2: Check for existing marker files from other instances
-        $markerFiles = Get-ChildItem -Path $tempMarkerDir -Filter "$scriptName.*.marker" -ErrorAction SilentlyContinue
-
-
-        foreach ($markerFile in $markerFiles) {
-            Write-Host "Checking marker: $($markerFile.Name)"
-            try {
-                # Extract PID from filename - USE ESCAPED PATTERN
-                if ($markerFile.Name -match "$scriptNameEscaped\.(\d+)\.marker") {
-                    $markerPID = [int]$matches[1]
-
-                    # Skip our own marker
-                    if ($markerPID -eq $currentPID) { continue }
-                    
-                    # Check if the process is still running
-                    $process = Get-Process -Id $markerPID -ErrorAction SilentlyContinue
-                    if ($process) {
-                        # Read marker file data
-                        try {
-                            $markerData = Get-Content -Path $markerFile.FullName | ConvertFrom-Json
-                            
-                            # Verify this is actually our script by checking process name and start time
-                            if ($process.ProcessName -match "powershell|pwsh" -and 
-                                $markerData.ScriptName -eq $scriptName) {
-                                
-                                $scriptInstances += [PSCustomObject]@{
-                                    PID             = $markerPID
-                                    StartTime       = [DateTime]$markerData.StartTime.ToLocalTime()
-                                    ProcessName     = $process.ProcessName
-                                    CommandLine     = "PowerShell script instance (marker detected)"
-                                    DetectionMethod = "Marker file"
-                                }
-                            }
-                        }
-                        catch {
-                            Write-Host "Could not read marker file $($markerFile.Name): $_" -ForegroundColor Yellow
-                        }
-                    }
-                    else {
-                        # Process no longer exists, clean up stale marker
-                        try {
-                            Remove-Item $markerFile.FullName -Force -ErrorAction SilentlyContinue
-                            Write-Host "Cleaned up stale marker for PID $markerPID" -ForegroundColor Gray
-                        }
-                        catch {
-                            # Ignore cleanup errors
-                        }
-                    }
-                }
-            }
-            catch {
-                Write-Host "Error processing marker file $($markerFile.Name): $_" -ForegroundColor Yellow
-            }
-        }
+    $issues = @()
     
-        
-        # Remove duplicates and sort by start time
-        $uniqueInstances = $scriptInstances | Sort-Object PID -Unique | Sort-Object StartTime
-        
-        $instanceCount = $uniqueInstances.Count
-        Write-Host "Found $instanceCount other script instances running" -ForegroundColor $(if ($instanceCount -gt 0) { "Yellow" } else { "Green" })
-        
-        if ($instanceCount -gt 0) {
-            Write-Host "Detected instances:" -ForegroundColor Yellow
-            foreach ($instance in $uniqueInstances) {
-                Write-Host "  PID $($instance.PID): Started $($instance.StartTime), Method: $($instance.DetectionMethod)" -ForegroundColor Gray
-            }
+    # Check MaxCLL and MaxFALL
+    if ($Metadata.HasContentLight) {
+        if ($Metadata.MaxCLL -le 1 -or $Metadata.MaxCLL -gt 10000) {
+            $issues += "Invalid MaxCLL: $($Metadata.MaxCLL)"
         }
-        
-        # Register cleanup for our marker file with better error handling
-        $script:CurrentMarkerFile = $ourMarkerFile
-        
-        # Register cleanup that actually works
-        $cleanupAction = {
-            try {
-                if ($script:CurrentMarkerFile -and (Test-Path $script:CurrentMarkerFile)) {
-                    Remove-Item $script:CurrentMarkerFile -Force -ErrorAction SilentlyContinue
-                    Write-Host "Cleaned up marker file: $script:CurrentMarkerFile" -ForegroundColor Gray
-                }
-            }
-            catch {
-                # Ignore cleanup errors during shutdown
-            }
+        if ($Metadata.MaxFALL -le 1 -or $Metadata.MaxFALL -gt 4000) {
+            $issues += "Invalid MaxFALL: $($Metadata.MaxFALL)"
         }
-        
-        # Register for multiple exit events
-        try {
-            Register-EngineEvent PowerShell.Exiting -Action $cleanupAction | Out-Null
+        if ($Metadata.MaxFALL -gt $Metadata.MaxCLL) {
+            $issues += "MaxFALL ($($Metadata.MaxFALL)) cannot exceed MaxCLL ($($Metadata.MaxCLL))"
         }
-        catch {
-            # Ignore if already registered
-        }
-        
-        return $uniqueInstances
-        
     }
-    catch {
-        Write-Warning "Failed to detect other script instances: $_"
-        Write-Host "Assuming single instance mode" -ForegroundColor Yellow
-        return @()
+    
+    # Check mastering display luminance
+    if ($Metadata.HasMasteringDisplay) {
+        # MaxLuminance should be 1000-10000 cd/m² (10000000-100000000 in 0.0001 units)
+        if ($Metadata.MaxLuminance -lt 5000000 -or $Metadata.MaxLuminance -gt 100000000) {
+            $issues += "Invalid max luminance: $($Metadata.MaxLuminance)"
+        }
+        # MinLuminance should be > 0
+        if ($Metadata.MinLuminance -le 0) {
+            $issues += "Invalid min luminance: $($Metadata.MinLuminance)"
+        }
     }
+    
+    if ($issues.Count -gt 0) {
+        Write-Warning "HDR metadata validation failed:"
+        foreach ($issue in $issues) {
+            Write-Warning "  - $issue"
+        }
+        return $false
+    }
+    
+    Write-Host "HDR metadata validation: PASSED" -ForegroundColor Green
+    return $true
 }
 
+function Get-HDREncodingParameters {
+    param(
+        [hashtable]$SourceMetadata,
+        [string]$ContentType = "animation"  # Options: "animation", "live-action", "documentary"
+    )
+    
+    $params = @{
+        MasterDisplay = $null
+        MaxCLL = $null
+        X265Params = @()
+    }
+    
+    # Use source metadata if valid
+    if ($SourceMetadata -and $SourceMetadata.IsValid) {
+        Write-Host "Using validated source HDR metadata" -ForegroundColor Green
+        
+        # Build master-display string: G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)
+        $params.MasterDisplay = "G($($SourceMetadata.GreenX),$($SourceMetadata.GreenY))" +
+                                "B($($SourceMetadata.BlueX),$($SourceMetadata.BlueY))" +
+                                "R($($SourceMetadata.RedX),$($SourceMetadata.RedY))" +
+                                "WP($($SourceMetadata.WhitePointX),$($SourceMetadata.WhitePointY))" +
+                                "L($($SourceMetadata.MaxLuminance),$($SourceMetadata.MinLuminance))"
+        
+        $params.MaxCLL = "$($SourceMetadata.MaxCLL),$($SourceMetadata.MaxFALL)"
+        
+        Write-Host "  Source master-display: $($params.MasterDisplay)" -ForegroundColor Gray
+        Write-Host "  Source max-cll: $($params.MaxCLL)" -ForegroundColor Gray
+    }
+    else {
+        # Use best-guess defaults based on content type
+        Write-Host "Source metadata invalid or missing - using best-guess HDR10 defaults" -ForegroundColor Yellow
+        
+        # Standard Display P3 primaries with BT.2020 color space
+        # These are the most common values for HDR10 content
+        $params.MasterDisplay = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"
+        
+        # Content-type specific MaxCLL/MaxFALL defaults
+        switch ($ContentType.ToLower()) {
+            "animation" {
+                # Animation tends to have lower peak brightness
+                $params.MaxCLL = "1500,200"
+                Write-Host "  Using animation defaults: MaxCLL=1500, MaxFALL=200" -ForegroundColor Yellow
+            }
+            "documentary" {
+                # Documentaries often have more varied lighting
+                $params.MaxCLL = "2000,300"
+                Write-Host "  Using documentary defaults: MaxCLL=2000, MaxFALL=300" -ForegroundColor Yellow
+            }
+            default {
+                # Live-action default (most common)
+                $params.MaxCLL = "1000,400"
+                Write-Host "  Using live-action defaults: MaxCLL=1000, MaxFALL=400" -ForegroundColor Yellow
+            }
+        }
+        
+        Write-Host "  Default master-display: Display P3 primaries, 1000 nit peak" -ForegroundColor Gray
+    }
+    
+    # Build x265 parameter strings
+    $params.X265Params += "master-display=$($params.MasterDisplay)"
+    $params.X265Params += "max-cll=$($params.MaxCLL)"
+    
+    return $params
+}
 
+function Get-HDRMasteringMetadata {
+    param([string]$FilePath)
+    
+    Write-Host "Extracting HDR mastering display metadata..." -ForegroundColor Cyan
+    
+    try {
+        # Extract side_data including mastering display metadata
+        $probeArgs = @(
+            "-v", "warning",
+            "-select_streams", "v:0",
+            "-print_format", "json",
+            "-show_frames",
+            "-read_intervals", "%+#1",  # Read only first frame
+            "-show_entries", "frame=color_space,color_primaries,color_transfer,side_data_list",
+            $FilePath
+        )
+        
+        $probeResult = Invoke-FFProbeWithCleanup -Arguments $probeArgs -TimeoutSeconds 30
+        
+        if (-not $probeResult.Success) {
+            Write-Warning "Failed to extract HDR metadata"
+            return $null
+        }
+        
+        $frameData = $probeResult.StdOut | ConvertFrom-Json
+        
+        if (-not $frameData.frames -or $frameData.frames.Count -eq 0) {
+            Write-Warning "No frame data found"
+            return $null
+        }
+        
+        $frame = $frameData.frames[0]
+        $sideDataList = $frame.side_data_list
+        
+        if (-not $sideDataList) {
+            Write-Host "No HDR side data found in source" -ForegroundColor Gray
+            return $null
+        }
+        
+        # Look for mastering display color volume
+        $masteringDisplay = $sideDataList | Where-Object { 
+            $_.side_data_type -eq "Mastering display metadata" 
+        }
+        
+        # Look for content light level
+        $contentLight = $sideDataList | Where-Object { 
+            $_.side_data_type -eq "Content light level metadata" 
+        }
+        
+        $metadata = @{
+            HasMasteringDisplay = $false
+            HasContentLight = $false
+            RedX = $null
+            RedY = $null
+            GreenX = $null
+            GreenY = $null
+            BlueX = $null
+            BlueY = $null
+            WhitePointX = $null
+            WhitePointY = $null
+            MaxLuminance = $null
+            MinLuminance = $null
+            MaxCLL = $null
+            MaxFALL = $null
+            IsValid = $false
+        }
+        
+        # Parse mastering display metadata
+        if ($masteringDisplay) {
+            Write-Host "Found mastering display metadata" -ForegroundColor Green
+            $metadata.HasMasteringDisplay = $true
+            
+            # Parse color primaries (in format "13250/50000" = 0.265)
+            if ($masteringDisplay.red_x) {
+                $metadata.RedX = [int]($masteringDisplay.red_x -split '/')[0]
+                $metadata.RedY = [int]($masteringDisplay.red_y -split '/')[0]
+            }
+            if ($masteringDisplay.green_x) {
+                $metadata.GreenX = [int]($masteringDisplay.green_x -split '/')[0]
+                $metadata.GreenY = [int]($masteringDisplay.green_y -split '/')[0]
+            }
+            if ($masteringDisplay.blue_x) {
+                $metadata.BlueX = [int]($masteringDisplay.blue_x -split '/')[0]
+                $metadata.BlueY = [int]($masteringDisplay.blue_y -split '/')[0]
+            }
+            if ($masteringDisplay.white_point_x) {
+                $metadata.WhitePointX = [int]($masteringDisplay.white_point_x -split '/')[0]
+                $metadata.WhitePointY = [int]($masteringDisplay.white_point_y -split '/')[0]
+            }
+            
+            # Parse luminance (in format "10000000/10000" = 1000 cd/m²)
+            if ($masteringDisplay.max_luminance) {
+                $metadata.MaxLuminance = [int]($masteringDisplay.max_luminance -split '/')[0]
+            }
+            if ($masteringDisplay.min_luminance) {
+                $metadata.MinLuminance = [int]($masteringDisplay.min_luminance -split '/')[0]
+            }
+            
+            Write-Host "  Max Luminance: $($metadata.MaxLuminance) (units of 0.0001 cd/m²)" -ForegroundColor Gray
+            Write-Host "  Min Luminance: $($metadata.MinLuminance) (units of 0.0001 cd/m²)" -ForegroundColor Gray
+        }
+        
+        # Parse content light level metadata
+        if ($contentLight) {
+            Write-Host "Found content light level metadata" -ForegroundColor Green
+            $metadata.HasContentLight = $true
+            
+            if ($contentLight.max_content) {
+                $metadata.MaxCLL = [int]$contentLight.max_content
+            }
+            if ($contentLight.max_average) {
+                $metadata.MaxFALL = [int]$contentLight.max_average
+            }
+            
+            Write-Host "  MaxCLL: $($metadata.MaxCLL) nits" -ForegroundColor Gray
+            Write-Host "  MaxFALL: $($metadata.MaxFALL) nits" -ForegroundColor Gray
+        }
+        
+        # Validate the metadata
+        $metadata.IsValid = Test-HDRMetadataValidity -Metadata $metadata
+        
+        return $metadata
+    }
+    catch {
+        Write-Warning "Exception extracting HDR metadata: $_"
+        return $null
+    }
+}
 function Start-ProcessWithCoreLimit {
     param(
         [string]$Executable,
@@ -3205,6 +3307,7 @@ function Get-ContentBasedQuality {
             Write-Host "   Sample at $samplePoint s..." -ForegroundColor DarkGray
             
             $basicAnalysisArgs = @(
+                "-hwaccel", "auto",
                 "-hide_banner",
                 "-v", "quiet", 
                 "-stats",
@@ -3615,6 +3718,7 @@ function Invoke-SourceQualityAnalysis {
             
             # Extract original sample to YUV
             $originalArgs = @(
+                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -3634,6 +3738,7 @@ function Invoke-SourceQualityAnalysis {
             
             # Create lossless re-encoding of the same sample
             $losslessArgs = @(
+                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -3654,6 +3759,7 @@ function Invoke-SourceQualityAnalysis {
             
             # Extract lossless sample to YUV
             $reencodedArgs = @(
+                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-i", $tempLosslessFile,
                 "-pix_fmt", "yuv420p",
@@ -4277,6 +4383,7 @@ function Invoke-QualityValidation {
             
             # Extract sample from original
             $originalArgs = @(
+                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -4295,6 +4402,7 @@ function Invoke-QualityValidation {
             
             # Extract sample from encoded
             $encodedArgs = @(
+                "-hwaccel", "auto",
                 "-y", "-hide_banner",
                 "-ss", $startTime.ToString(),
                 "-t", $SampleDurationSeconds.ToString(),
@@ -4928,6 +5036,7 @@ function Confirm-AudioStreamUsability {
     try {
         # Build args
         $sampleArgs = @(
+            "-hwaccel", "auto",
             "-hide_banner",
             "-i", $FilePath,
             "-map", "0:a:$($Stream.GlobalIndex)",
@@ -5282,6 +5391,7 @@ function Invoke-SubtitleExtraction {
         # Text-based subtitles: convert to SRT with timing preservation
         Write-Host "Converting text-based subtitle to SRT..." -ForegroundColor Yellow
         $largs = @(
+            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-analyzeduration", "1000000000",
             "-probesize", "5000000000",
@@ -5331,6 +5441,7 @@ function Invoke-SubtitleExtraction {
         Add-TempFile -FilePath $supOutputFile
         
         $largs = @(
+            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-i", $origFile, # $InputFile,
             "-max_muxing_queue_size", "65536",
@@ -5490,6 +5601,7 @@ function Invoke-HDR10PlusExtraction {
         
         # Build FFmpeg arguments for MP4 to MKV conversion (copy all streams)
          $mp4ToMkvArgs = @(
+            "-hwaccel", "auto",
             "-y", "-hide_banner",
             "-loglevel", "warning",
             "-i", $InputFile,
@@ -6018,6 +6130,7 @@ function Test-QSVAvailability {
         # Test 2: Check QSV device initialization with better error handling
         Write-Host "  Testing QSV device initialization..." -ForegroundColor Gray 
         $deviceTestArgs = @(
+            "-hwaccel", "auto",
             "-hide_banner",
             "-f", "lavfi", 
             "-i", "testsrc=duration=2:size=640x480:rate=30",
@@ -6162,6 +6275,7 @@ function Invoke-EnhancedHEVCExtraction {
     try {
         # Build FFmpeg arguments for HEVC extraction
         $extractArgs = @(
+            "-hwaccel", "auto",
             "-y", "-hide_banner", 
             "-loglevel", "warning",
             "-err_detect", "explode",           # Fail on any stream errors
@@ -6631,29 +6745,30 @@ function Invoke-AV1QSVEncoding {
     $outputFormat = "ivf"  # IVF container for AV1
     
     # Build AV1 QSV encoding arguments
-    $encodeArgs = @(
-        "-c:v", $codec,
-        "-preset", "veryslow",
-        "-profile:v", $lprofile,
-        "-global_quality", $av1Quality,
-        "-look_ahead_depth", [math]::Min(100, $EncodingSettings.LookAhead),
-        "-adaptive_i", "1",
-        "-adaptive_b", "1",
-        "-b_strategy", "1",
-        "-async_depth", "4",
-        "-aq_mode", "2",
-        "-g", $keyframeInterval,
-        "-keyint_min", $keyframeInterval,
-        "-bf", "7",  # AV1 can use more B-frames
-        "-refs", "7",  # AV1 can use more references
-        "-r", $VideoInfo.FrameRate,
-        "-pix_fmt", $pixelFormat,
-        "-f", $outputFormat
-    )
+$encodeArgs = @(
+    "-c:v", $codec,
+    "-preset", "veryslow",
+    "-profile:v", $lprofile,
+    "-global_quality", $av1Quality,
+    "-look_ahead_depth", [math]::Min(100, $EncodingSettings.LookAhead),
+    "-adaptive_i", "1",
+    "-adaptive_b", "1",
+    "-b_strategy", "1",
+    "-async_depth", "4",
+    "-aq_mode", "2",
+    "-g", $keyframeInterval,
+    "-keyint_min", $keyframeInterval,
+    "-bf", "7",
+    "-refs", "7",
+    "-r", $VideoInfo.FrameRate,
+    "-pix_fmt", $pixelFormat,
+    "-f", $outputFormat
+)
     
     # Build complete FFmpeg command
     
     $ffmpegArgs = @(
+        "-hwaccel", "auto",
         "-y", "-hide_banner",
         "-xerror",
         "-loglevel", "info",
@@ -7139,6 +7254,7 @@ function Invoke-EarlyDolbyVisionRemoval {
                                 # Fall back to FFmpeg method
                                 Write-Host "Falling back to FFmpeg re-containerization..." -ForegroundColor Yellow
                                 $remuxArgs = @(
+                                    "-hwaccel", "auto",
                                     "-y", "-hide_banner", "-loglevel", "warning",
                                     "-i", $InputFile,  # Original file for audio/subtitles
                                     "-i", $blFile,     # DV-removed video
@@ -7170,6 +7286,7 @@ function Invoke-EarlyDolbyVisionRemoval {
                             # Fall back to FFmpeg method
                             Write-Host "Falling back to FFmpeg re-containerization..." -ForegroundColor Yellow
                             $remuxArgs = @(
+                                "-hwaccel", "auto",
                                 "-y", "-hide_banner", "-loglevel", "warning",
                                 "-i", $InputFile,  # Original file for audio/subtitles
                                 "-i", $blFile,     # DV-removed video
@@ -7194,6 +7311,7 @@ function Invoke-EarlyDolbyVisionRemoval {
                         # Fall back to FFmpeg method if mkvmerge not available
                         Write-Host "mkvmerge not available - using FFmpeg re-containerization..." -ForegroundColor Yellow
                         $remuxArgs = @(
+                            "-hwaccel", "auto",
                             "-y", "-hide_banner", "-loglevel", "warning",
                             "-i", $InputFile,  # Original file for audio/subtitles
                             "-i", $blFile,     # DV-removed video
@@ -7587,6 +7705,7 @@ function Invoke-PlexOptimizedRemux {
     # Build comprehensive FFmpeg command with all streams
     $largs = @(
         '-y'
+        "-hwaccel", "auto",
         '-hide_banner'
         '-loglevel', 'warning'
     )
@@ -9096,35 +9215,37 @@ function Invoke-QSVEncodingWithErrorDetection {
         Write-Host "QSV output format: Raw HEVC bitstream" -ForegroundColor Gray
     }
     
-    # Build QSV encoding arguments with format fix
-    $encodeArgs = @(
-        "-c:v", $codec,
-        "-preset", "veryslow",
-        "-profile:v", $lprofile,
-        "-global_quality", $EncodingSettings.Quality,
-        "-look_ahead_depth", $EncodingSettings.LookAhead,
-        "-adaptive_i", "1",
-        "-adaptive_b", "1",
-        "-aq_mode", "2",
-        "-b_strategy", "1",
-        "-async_depth", "4",
-        "-rdo", "1",
-        "-max_frame_size", $EncodingSettings.MaxFrameSize,
-        #        "-low_power", "1",  
-        "-g", $keyframeInterval,
-        "-keyint_min", $keyframeInterval,
-        "-bf", "5",
-        "-forced_idr", "1",
-        "-refs", "3",
-        "-r", $VideoInfo.FrameRate,
-        "-pix_fmt", $pixelFormat,
-        "-f", $outputFormat  # FIXED: Use determined format
-    ) + $containerArgs  # Add container-specific args if needed
+# Build QSV encoding arguments with format fix
+$encodeArgs = @(
+    "-c:v", $codec,
+    "-preset", "veryslow",
+    "-profile:v", $lprofile,
+    "-global_quality", $EncodingSettings.Quality,
+    "-look_ahead_depth", $EncodingSettings.LookAhead,
+    "-adaptive_i", "1",
+    "-adaptive_b", "1",
+    "-aq_mode", "2",
+    "-b_strategy", "1",
+    "-async_depth", "4",
+    "-rdo", "1",
+    "-max_frame_size", $EncodingSettings.MaxFrameSize,
+    "-g", $keyframeInterval,
+    "-keyint_min", $keyframeInterval,
+    "-bf", "5",
+    "-forced_idr", "1",
+    "-refs", "3",
+    "-r", $VideoInfo.FrameRate,
+    "-pix_fmt", $pixelFormat,
+    "-f", $outputFormat
+)
+
+$encodeArgs += $containerArgs
     
     # Build complete FFmpeg command
 
     $ffmpegArgs = @(
         "-y", "-hide_banner",
+        "-hwaccel", "auto",
         "-xerror", # Exit on any error
         "-loglevel", "info",
         "-fflags", "+genpts",
@@ -9351,6 +9472,28 @@ function Invoke-PlexSoftwareEncodingWithErrorDetection {
         "b-adapt=2",
         "ref=3"
     )
+# Add HDR metadata parameters if this is HDR content
+if ($ColorInfo.IsHDR) {
+    Write-Host "`nAdding HDR10 metadata to encoding..." -ForegroundColor Cyan
+    
+    # Extract source HDR metadata
+    $sourceHDRMetadata = Get-HDRMasteringMetadata -FilePath $InputFile
+    
+    # Determine content type (you can customize this detection logic)
+    $contentType = "live-action"  # Default
+    
+    # Optional: Auto-detect animation
+    # You could check filename, resolution patterns, codec info, etc.
+    # Example: if ($InputFile -match "animation|anime|cartoon") { $contentType = "animation" }
+    
+    # Get appropriate HDR encoding parameters
+    $hdrParams = Get-HDREncodingParameters -SourceMetadata $sourceHDRMetadata -ContentType $contentType
+    
+    # Add HDR parameters to x265 params
+    $x265Params += $hdrParams.X265Params
+    
+    Write-Host "HDR metadata added to encoding parameters" -ForegroundColor Green
+}    
     
     $x265ParamString = $x265Params -join ":"
     
@@ -9400,6 +9543,7 @@ function Invoke-PlexSoftwareEncodingWithErrorDetection {
 
     $ffmpegArgs = @(
         "-y", "-hide_banner",
+        "-hwaccel", "auto",
         "-xerror", # Exit on any error
         "-loglevel", "info",
         "-fflags", "+genpts",
@@ -10570,37 +10714,6 @@ if ($Script:HDR10PlusStatus.HasHDR10Plus -and $codecType -eq "HEVC") {
 
 $finalVideo = $encodedVideo
 
-# STEP 5.5: Convert raw stream to MKV (intermediate containerization) - REQUIRES mkvmerge
-Write-Host "`n=== MKV Intermediate Containerization ===" -ForegroundColor Yellow
-
-if ($codecType -eq "AV1" -and $videoExtension -eq ".ivf") {
-    Write-Host "Converting AV1 IVF stream to MKV intermediate (mkvmerge required)..." -ForegroundColor Cyan
-} else {
-    Write-Host "Converting raw HEVC stream to MKV intermediate (mkvmerge required)..." -ForegroundColor Cyan
-}
-
-$intermediateMKV = New-TempFile -BaseName "$baseName.intermediate" -Extension ".mkv"
-
-# Check if mkvmerge is available - REQUIRED
-$mkvmergePath = $Config.MKVMergeExe 
-
-# Test if mkvmerge is available
-$mkvmergeAvailable = $false
-try {
-    $mkvmergeTest = & $mkvmergePath --version 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Using mkvmerge version: $($mkvmergeTest)" -ForegroundColor Gray
-        $mkvmergeAvailable = $true
-    }
-}
-catch {
-    $mkvmergeAvailable = $false
-}
-
-if (-not $mkvmergeAvailable) {
-    throw "mkvmerge is required but not available at: $mkvmergePath. Please install MKVToolNix or update the path."
-}
-
 # Use mkvmerge for fast, efficient containerization
 Write-Host "Using mkvmerge for MKV containerization..." -ForegroundColor Green
 
@@ -10608,23 +10721,115 @@ Write-Host "Using mkvmerge for MKV containerization..." -ForegroundColor Green
 $trackName = if ($codecType -eq "AV1") { "AV1 Video" } else { "HEVC Video" }
 $codecDescription = if ($codecType -eq "AV1") { "AV1 (Better Compression)" } else { "HEVC (HDR10+ Preserved)" }
 
+# NEW: Get HDR metadata from source for mkvmerge
+$sourceHDRMetadata = $null
+if ($ColorInfo.IsHDR) {
+    Write-Host "Extracting HDR metadata for mkvmerge..." -ForegroundColor Cyan
+    $sourceHDRMetadata = Get-HDRMasteringMetadata -FilePath $InputFile
+    
+    if ($sourceHDRMetadata -and $sourceHDRMetadata.IsValid) {
+        Write-Host "  Using source HDR metadata for MKV containerization" -ForegroundColor Green
+    } else {
+        Write-Host "  Using default HDR metadata for MKV containerization" -ForegroundColor Yellow
+    }
+}
+
+$intermediateMKV = New-TempFile -BaseName "$baseName.intermediate" -Extension ".mkv"
+
 $mkvmergeArgs = @(
     "--output", $intermediateMKV,
-    "--language", "0:und",  # Set video language as undefined
+    "--language", "0:und",
     "--track-name", "0:$trackName",
     "--default-track", "0:yes",
-    "--compression", "0:none",  # No additional compression
- #   "--no-chapters",
+    "--compression", "0:none",
     "--no-attachments",
-    "--title", "Plex Optimized $codecType",
-    $finalVideo
+    "--title", "Plex Optimized $codecType"
 )
 
-# For AV1, we might need to specify the codec ID
+# NEW: Add HDR metadata to mkvmerge for proper containerization
+if ($ColorInfo.IsHDR) {
+    Write-Host "Adding HDR10 metadata to MKV container..." -ForegroundColor Cyan
+    
+    # Get HDR encoding parameters (which includes smart defaults)
+    $hdrParams = Get-HDREncodingParameters -SourceMetadata $sourceHDRMetadata -ContentType "live-action"
+    
+    # Parse MaxCLL and MaxFALL from the parameters
+    $maxCLL = 1500  # Fallback default
+    $maxFALL = 200  # Fallback default
+    
+    if ($hdrParams.MaxCLL) {
+        $cllParts = $hdrParams.MaxCLL -split ','
+        if ($cllParts.Count -eq 2) {
+            $maxCLL = [int]$cllParts[0]
+            $maxFALL = [int]$cllParts[1]
+        }
+    }
+    
+    Write-Host "  Using MaxCLL: $maxCLL, MaxFALL: $maxFALL" -ForegroundColor Green
+    
+    # Add color metadata
+    $mkvmergeArgs += "--colour-matrix", "0:9"  # BT.2020 non-constant
+    $mkvmergeArgs += "--colour-range", "0:1"   # Limited range
+    $mkvmergeArgs += "--colour-transfer-characteristics", "0:16"  # PQ (SMPTE ST 2084)
+    $mkvmergeArgs += "--colour-primaries", "0:9"  # BT.2020
+    
+    # Parse mastering display from hdrParams
+    if ($hdrParams.MasterDisplay) {
+        # Extract chromaticity coordinates from master-display string
+        # Format: G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)
+        if ($hdrParams.MasterDisplay -match 'G\((\d+),(\d+)\)B\((\d+),(\d+)\)R\((\d+),(\d+)\)WP\((\d+),(\d+)\)L\((\d+),(\d+)\)') {
+            $gx = $matches[1]; $gy = $matches[2]
+            $bx = $matches[3]; $by = $matches[4]
+            $rx = $matches[5]; $ry = $matches[6]
+            $wpx = $matches[7]; $wpy = $matches[8]
+            $maxLum = $matches[9]; $minLum = $matches[10]
+            
+            # Build chromaticity coordinates string for mkvmerge
+#            $chromaCoords = "0:$rx,$ry,$gx,$gy,$bx,$by,$wpx,$wpy"
+            $chromaCoords = "0:$rx,$ry,$gx,$gy,$bx,$by"
+            
+            $mkvmergeArgs += "--chromaticity-coordinates", $chromaCoords
+            $mkvmergeArgs += "--max-content-light", "0:$maxCLL"
+            $mkvmergeArgs += "--max-frame-light", "0:$maxFALL"
+            $mkvmergeArgs += "--max-luminance", "0:$maxLum"
+            $mkvmergeArgs += "--min-luminance", "0:$minLum"
+            
+            Write-Host "  Applied mastering display metadata to MKV" -ForegroundColor Green
+        } else {
+            Write-Warning "  Could not parse master-display string, using defaults"
+            # Use the fallback below
+            $useDefaults = $true
+        }
+    } else {
+        $useDefaults = $true
+    }
+    
+    # Fallback to defaults if needed
+    if ($useDefaults) {
+        $defaultChroma = "0:34000,16000,13250,34500,7500,3000"
+        $mkvmergeArgs += "--chromaticity-coordinates", $defaultChroma
+        $mkvmergeArgs += "--max-content-light", "0:$maxCLL"
+        $mkvmergeArgs += "--max-frame-light", "0:$maxFALL"
+        $mkvmergeArgs += "--max-luminance", "0:10000000"  # 1000 cd/m² in 0.0001 units
+        $mkvmergeArgs += "--min-luminance", "0:1"         # 0.0001 cd/m²
+        
+        Write-Host "  Applied default Display P3 HDR metadata to MKV" -ForegroundColor Yellow
+    }
+}
+
+# For AV1, specify the codec ID
 if ($codecType -eq "AV1" -and $videoExtension -eq ".ivf") {
-    # Add AV1-specific mkvmerge parameters if needed
     $mkvmergeArgs += "--fourcc", "0:av01"
 }
+
+# Add the input file last
+$mkvmergeArgs += $finalVideo
+$mkvmergePath = $Config.MKVMergeExe 
+   $quotedArgs = $mkvmergeArgs | ForEach-Object {
+            if ($_ -match '\s') { "`"$_`"" } else { $_ }
+        }
+        $commandLine = $quotedArgs -join ' '
+        Write-Host "[CMD] $mkvmergePath $commandLine" -ForegroundColor Gray
 
 # Execute mkvmerge
 $processInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -10676,6 +10881,7 @@ else {
     Write-Warning "mkvmerge failed with exit code: $exitCode"
     if ($stderr) {
         Write-Host "mkvmerge error:" -ForegroundColor Red
+        Write-Host $stdout -ForegroundColor Red
         Write-Host $stderr -ForegroundColor Red
     }
     throw "mkvmerge failed to create MKV intermediate"

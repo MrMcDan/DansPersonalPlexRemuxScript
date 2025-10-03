@@ -1,61 +1,27 @@
 <#
 .SYNOPSIS
-    Comprehensive video file analysis tool for diagnosing Plex playback issues.
+    Comprehensive Plex video file analyzer with HDR metadata validation
 
 .DESCRIPTION
-    Uses FFmpeg and FFprobe to extract detailed information about video files
-    that commonly cause Plex playback problems. Outputs human-readable report
-    highlighting potential compatibility issues.
+    Analyzes video files for Plex compatibility issues including:
+    - Container format problems
+    - Video codec compatibility
+    - Audio codec and channel layout issues
+    - Subtitle format problems
+    - HDR metadata validation (mastering display and content light level)
+    - Container integrity validation
 
 .PARAMETER InputFile
     Path to the video file to analyze
 
 .PARAMETER OutputFile
-    Optional path to save the report. If not specified, outputs to console only.
+    Optional path to save the analysis report as a text file
 
 .EXAMPLE
-    .\Get-PlexVideoInfo.ps1 -InputFile "C:\Movies\Problem_Movie.mkv"
+    .\Get-PlexVideoInfo.ps1 -InputFile "C:\Videos\movie.mkv"
     
 .EXAMPLE
-    .\Get-PlexVideoInfo.ps1 -InputFile "C:\Movies\Problem_Movie.mkv" -OutputFile "C:\report.txt"
-
-.NOTES
-    SETUP INSTRUCTIONS:
-    
-    1. Download FFmpeg:
-       - Visit: https://www.gyan.dev/ffmpeg/builds/
-       - Download: "ffmpeg-release-full.7z" (or the latest full build)
-       - Extract to a folder like: C:\ffmpeg or E:\tools\ffmpeg
-    
-    2. Add FFmpeg to PATH (OPTION A - Recommended):
-       - Open System Properties > Environment Variables
-       - Under "System variables", find "Path" and click Edit
-       - Click "New" and add the path to FFmpeg's bin folder
-         Example: C:\ffmpeg\bin
-       - Click OK on all dialogs
-       - Restart PowerShell/Terminal
-       - Test by running: ffmpeg -version
-    
-    3. OR Configure Script Paths (OPTION B):
-       - Edit this script (lines 35-36)
-       - Set full paths to ffmpeg.exe and ffprobe.exe
-       - Example:
-         $ffprobePath = "C:\ffmpeg\bin\ffprobe.exe"
-         $ffmpegPath = "C:\ffmpeg\bin\ffmpeg.exe"
-    
-    4. Run the script:
-       - Open PowerShell 7 (recommended) or Windows PowerShell
-       - Navigate to script location: cd C:\Scripts
-       - Run: .\Get-PlexVideoInfo.ps1 -InputFile "C:\path\to\video.mkv"
-    
-    If you get "cannot be loaded because running scripts is disabled":
-       - Run PowerShell as Administrator
-       - Execute: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-       - Answer Y (Yes) to the prompt
-       - Close and reopen PowerShell
-
-    Author: Created for Plex troubleshooting
-    Requires: FFmpeg (ffmpeg.exe and ffprobe.exe)
+    .\Get-PlexVideoInfo.ps1 -InputFile "C:\Videos\movie.mkv" -OutputFile "C:\Reports\analysis.txt"
 #>
 
 param(
@@ -66,16 +32,13 @@ param(
     [string]$OutputFile
 )
 
-# Configuration - Update these paths if needed
-$ffprobePath = "E:\plex\ffmpeg-2025-06-02-git-688f3944ce-full_build\bin\ffprobe.exe"  # Assumes ffprobe is in PATH, otherwise provide full path
-$ffmpegPath = "E:\plex\ffmpeg-2025-06-02-git-688f3944ce-full_build\bin\ffmpeg.exe"    # Assumes ffmpeg is in PATH, otherwise provide full path
+# Path to ffprobe and ffmpeg - update these to match your FFmpeg installation
+$ffprobePath = "E:\plex\ffmpeg-2025-06-02-git-688f3944ce-full_build\bin\ffprobe.exe"
+$ffmpegPath = "E:\plex\ffmpeg-2025-06-02-git-688f3944ce-full_build\bin\ffmpeg.exe"
 
-# Color coding for console output
+# Color output functions
 function Write-ColorOutput {
-    param(
-        [string]$Text,
-        [string]$Color = "White"
-    )
+    param([string]$Text, [string]$Color)
     Write-Host $Text -ForegroundColor $Color
 }
 
@@ -83,7 +46,7 @@ function Write-Section {
     param([string]$Title)
     Write-Host ""
     Write-ColorOutput "===================================================================" "Cyan"
-    Write-ColorOutput "  $Title" "Cyan"
+    Write-ColorOutput $Title "Cyan"
     Write-ColorOutput "===================================================================" "Cyan"
 }
 
@@ -100,6 +63,260 @@ function Write-Problem {
 function Write-Good {
     param([string]$Text)
     Write-ColorOutput "  + $Text" "Green"
+}
+
+function Test-HDRMetadata {
+    param([object]$VideoStream)
+    
+    Write-Section "HDR METADATA VALIDATION"
+    
+    # Check if this is an HDR stream
+    $isHDR = $false
+    if ($VideoStream.color_transfer -match "smpte2084|arib-std-b67") {
+        $isHDR = $true
+        Write-Host "  HDR detected: $($VideoStream.color_transfer)" -ForegroundColor Green
+    } else {
+        Write-Host "  This is not an HDR video (SDR content)" -ForegroundColor Gray
+        return
+    }
+    
+    # Get side_data for HDR metadata
+    $sideDataJson = & $ffprobePath -v quiet -select_streams v:0 -print_format json -show_frames -read_intervals "%+#1" -show_entries "frame=side_data_list" "$InputFile" 2>&1
+    
+    if (-not $sideDataJson) {
+        Write-Issue "Could not extract HDR side data for validation"
+        return
+    }
+    
+    try {
+        $frameData = $sideDataJson | ConvertFrom-Json
+        $sideDataList = $frameData.frames[0].side_data_list
+        
+        if (-not $sideDataList) {
+            Write-Issue "No HDR side data found - file may have incomplete HDR metadata"
+            return
+        }
+        
+        # Find mastering display metadata
+        $masteringDisplay = $sideDataList | Where-Object { $_.side_data_type -eq "Mastering display metadata" }
+        
+        # Find content light level metadata
+        $contentLight = $sideDataList | Where-Object { $_.side_data_type -eq "Content light level metadata" }
+        
+        # Validate Mastering Display Metadata
+        if ($masteringDisplay) {
+            Write-Host ""
+            Write-ColorOutput "  Mastering Display Metadata:" "White"
+            Write-Host "  -----------------------------------------------------------------"
+            
+            # Parse and validate luminance values
+            if ($masteringDisplay.max_luminance) {
+                $maxLumRaw = [int]($masteringDisplay.max_luminance -split '/')[0]
+                $maxLumNits = [math]::Round($maxLumRaw / 10000, 1)
+                Write-Host "  Max Luminance: $maxLumNits cd/m² ($maxLumRaw units)"
+                
+                # Validate max luminance (should be 1000-10000 cd/m²)
+                if ($maxLumRaw -lt 5000000 -or $maxLumRaw -gt 100000000) {
+                    Write-Problem "Invalid max luminance value! Should be 5,000,000-100,000,000 units (500-10,000 cd/m²)"
+                    Write-Host "    This may cause tone mapping issues on some displays" -ForegroundColor Yellow
+                } else {
+                    Write-Good "Max luminance is within valid range"
+                }
+            } else {
+                Write-Issue "Max luminance not found in metadata"
+            }
+            
+            if ($masteringDisplay.min_luminance) {
+                $minLumRaw = [int]($masteringDisplay.min_luminance -split '/')[0]
+                $minLumNits = [math]::Round($minLumRaw / 10000, 4)
+                Write-Host "  Min Luminance: $minLumNits cd/m² ($minLumRaw units)"
+                
+                # Validate min luminance (should be > 0)
+                if ($minLumRaw -le 0) {
+                    Write-Problem "Invalid min luminance value! Must be greater than 0"
+                    Write-Host "    This will cause black crush issues" -ForegroundColor Yellow
+                } else {
+                    Write-Good "Min luminance is valid"
+                }
+            } else {
+                Write-Issue "Min luminance not found in metadata"
+            }
+            
+            # Display color primaries info
+            if ($masteringDisplay.red_x) {
+                Write-Host ""
+                Write-Host "  Color Primaries (in 0.00002 units):" -ForegroundColor Gray
+                Write-Host "    Red:   X=$($masteringDisplay.red_x), Y=$($masteringDisplay.red_y)"
+                Write-Host "    Green: X=$($masteringDisplay.green_x), Y=$($masteringDisplay.green_y)"
+                Write-Host "    Blue:  X=$($masteringDisplay.blue_x), Y=$($masteringDisplay.blue_y)"
+                Write-Host "    White: X=$($masteringDisplay.white_point_x), Y=$($masteringDisplay.white_point_y)"
+            }
+            
+        } else {
+            Write-Problem "No mastering display metadata found!"
+            Write-Host "    HDR playback may not work correctly without this metadata" -ForegroundColor Yellow
+            Write-Host "    Recommendation: Re-encode with proper HDR metadata injection" -ForegroundColor Yellow
+        }
+        
+        # Validate Content Light Level Metadata
+        if ($contentLight) {
+            Write-Host ""
+            Write-ColorOutput "  Content Light Level Metadata:" "White"
+            Write-Host "  -----------------------------------------------------------------"
+            
+            $maxCLL = $null
+            $maxFALL = $null
+            
+            if ($contentLight.max_content) {
+                $maxCLL = [int]$contentLight.max_content
+                Write-Host "  MaxCLL (Max Content Light Level): $maxCLL nits"
+                
+                # Validate MaxCLL (should be 1-10000 nits, typically 1000-4000)
+                if ($maxCLL -le 1 -or $maxCLL -gt 10000) {
+                    Write-Problem "Invalid MaxCLL value! Should be 1-10,000 nits"
+                    Write-Host "    Typical values are 1000-4000 nits for most content" -ForegroundColor Yellow
+                } else {
+                    Write-Good "MaxCLL is within valid range"
+                    
+                    if ($maxCLL -lt 1000) {
+                        Write-Host "    Note: MaxCLL is quite low, may indicate animation or dim content" -ForegroundColor Gray
+                    } elseif ($maxCLL -gt 4000) {
+                        Write-Host "    Note: MaxCLL is high, indicates very bright highlights" -ForegroundColor Gray
+                    }
+                }
+            } else {
+                Write-Issue "MaxCLL not found in metadata"
+            }
+            
+            if ($contentLight.max_average) {
+                $maxFALL = [int]$contentLight.max_average
+                Write-Host "  MaxFALL (Max Frame Average Light Level): $maxFALL nits"
+                
+                # Validate MaxFALL (should be 1-4000 nits, typically 100-800)
+                if ($maxFALL -le 1 -or $maxFALL -gt 4000) {
+                    Write-Problem "Invalid MaxFALL value! Should be 1-4,000 nits"
+                    Write-Host "    Typical values are 100-800 nits for most content" -ForegroundColor Yellow
+                } else {
+                    Write-Good "MaxFALL is within valid range"
+                }
+                
+                # Cross-validate MaxCLL and MaxFALL
+                if ($maxCLL -and $maxFALL) {
+                    if ($maxFALL -gt $maxCLL) {
+                        Write-Problem "MaxFALL ($maxFALL) exceeds MaxCLL ($maxCLL)!"
+                        Write-Host "    This is physically impossible and indicates corrupted metadata" -ForegroundColor Yellow
+                    } else {
+                        Write-Good "MaxCLL and MaxFALL relationship is valid"
+                    }
+                }
+            } else {
+                Write-Issue "MaxFALL not found in metadata"
+            }
+            
+        } else {
+            Write-Problem "No content light level metadata found!"
+            Write-Host "    Some displays may not tone map correctly without this metadata" -ForegroundColor Yellow
+            Write-Host "    Recommendation: Re-encode with proper HDR metadata injection" -ForegroundColor Yellow
+        }
+        
+        # Check for HDR10+ dynamic metadata
+        $hdr10Plus = $sideDataList | Where-Object { 
+            $_.side_data_type -match "HDR dynamic metadata SMPTE2094-40" 
+        }
+        
+        if ($hdr10Plus) {
+            Write-Host ""
+            Write-ColorOutput "  HDR10+ Dynamic Metadata: DETECTED" "Green"
+            Write-Host "    This file contains scene-by-scene HDR metadata"
+            Write-Host "    Note: HDR10+ may not be preserved during Plex transcoding" -ForegroundColor Yellow
+        }
+        
+        # Overall assessment
+        Write-Host ""
+        Write-ColorOutput "  Overall HDR Metadata Assessment:" "White"
+        Write-Host "  -----------------------------------------------------------------"
+        
+        $validationIssues = @()
+        
+        # Collect all validation issues
+        if (-not $masteringDisplay) {
+            $validationIssues += "Missing mastering display metadata"
+        } else {
+            if ($masteringDisplay.max_luminance) {
+                $maxLumRaw = [int]($masteringDisplay.max_luminance -split '/')[0]
+                if ($maxLumRaw -lt 5000000) {
+                    $validationIssues += "Max luminance too low: $maxLumRaw (should be >= 5,000,000)"
+                }
+                if ($maxLumRaw -gt 100000000) {
+                    $validationIssues += "Max luminance too high: $maxLumRaw (should be <= 100,000,000)"
+                }
+            } else {
+                $validationIssues += "Max luminance not found"
+            }
+            
+            if ($masteringDisplay.min_luminance) {
+                $minLumRaw = [int]($masteringDisplay.min_luminance -split '/')[0]
+                if ($minLumRaw -le 0) {
+                    $validationIssues += "Min luminance invalid: $minLumRaw (must be > 0)"
+                }
+            } else {
+                $validationIssues += "Min luminance not found"
+            }
+        }
+        
+        if (-not $contentLight) {
+            $validationIssues += "Missing content light level metadata"
+        } else {
+            if ($contentLight.max_content) {
+                $maxCLL = [int]$contentLight.max_content
+                if ($maxCLL -le 1) {
+                    $validationIssues += "MaxCLL too low: $maxCLL (should be > 1)"
+                }
+                if ($maxCLL -gt 10000) {
+                    $validationIssues += "MaxCLL too high: $maxCLL (should be <= 10,000)"
+                }
+            } else {
+                $validationIssues += "MaxCLL not found"
+            }
+            
+            if ($contentLight.max_average) {
+                $maxFALL = [int]$contentLight.max_average
+                if ($maxFALL -le 1) {
+                    $validationIssues += "MaxFALL too low: $maxFALL (should be > 1)"
+                }
+                if ($maxFALL -gt 4000) {
+                    $validationIssues += "MaxFALL too high: $maxFALL (should be <= 4,000)"
+                }
+                
+                # Cross-validate MaxCLL and MaxFALL
+                if ($contentLight.max_content) {
+                    $maxCLL = [int]$contentLight.max_content
+                    if ($maxFALL -gt $maxCLL) {
+                        $validationIssues += "MaxFALL ($maxFALL) exceeds MaxCLL ($maxCLL) - physically impossible"
+                    }
+                }
+            } else {
+                $validationIssues += "MaxFALL not found"
+            }
+        }
+        
+        # Display results
+        if ($validationIssues.Count -gt 0) {
+            Write-Problem "HDR metadata has $($validationIssues.Count) validation issue(s):"
+            foreach ($issue in $validationIssues) {
+                Write-Host "    - $issue" -ForegroundColor Red
+            }
+            Write-Host ""
+            Write-Host "  Recommendation: Re-encode with the Plex conversion script" -ForegroundColor Yellow
+            Write-Host "  The script will inject proper HDR metadata with validated values" -ForegroundColor Yellow
+        } else {
+            Write-Good "All HDR metadata validation checks passed"
+            Write-Host "    Mastering display and content light level metadata are valid" -ForegroundColor Green
+        }
+        
+    } catch {
+        Write-Problem "Error parsing HDR metadata: $_"
+    }
 }
 
 # Validate file exists
@@ -162,121 +379,47 @@ if ($videoStreams.Count -eq 0) {
     Write-Problem "No video streams found!"
 } else {
     foreach ($video in $videoStreams) {
-        # Skip Motion JPEG streams (usually thumbnails/cover art)
-        if ($video.codec_name -eq "mjpeg") {
-            Write-Host ""
-            Write-Host "  Skipping Video Stream #$($video.index) (Motion JPEG - likely thumbnail/cover art)"
-            continue
-        }
-        
         $streamIndex = $video.index
         Write-Host ""
         Write-ColorOutput "  Video Stream #$streamIndex" "White"
         Write-Host "  -----------------------------------------------------------------"
         
-        # Basic codec info
         Write-Host "  Codec: $($video.codec_name) ($($video.codec_long_name))"
-        Write-Host "  Profile: $($video.profile)"
         Write-Host "  Resolution: $($video.width)x$($video.height)"
         Write-Host "  Pixel Format: $($video.pix_fmt)"
+        Write-Host "  Frame Rate: $($video.r_frame_rate) fps"
+        Write-Host "  Aspect Ratio: $($video.display_aspect_ratio)"
         
-        # Frame rate
-        $fps = if ($video.r_frame_rate -match "(\d+)/(\d+)") {
-            [math]::Round([int]$matches[1] / [int]$matches[2], 3)
-        } else { "Unknown" }
-        Write-Host "  Frame Rate: $fps fps"
-        
-        # Bitrate
         if ($video.bit_rate) {
             Write-Host "  Bitrate: $([math]::Round($video.bit_rate / 1000000, 2)) Mbps"
         }
         
-        # Check for problematic codecs
-        if ($video.codec_name -eq "mpeg2video") {
-            Write-Issue "MPEG2 video may require transcoding on some clients."
-        }
-        if ($video.codec_name -eq "vc1") {
-            Write-Problem "VC-1 codec often causes issues. Recommend re-encoding to H.264/HEVC."
-        }
-        if ($video.codec_name -match "vp8|vp9" -and $format.format.format_name -notmatch "webm") {
-            Write-Issue "VP8/VP9 in non-WebM container may have compatibility issues."
-        }
-        
-        # HDR Analysis
-        Write-Host ""
-        Write-ColorOutput "  HDR/Color Information:" "White"
+        # Color space information
         Write-Host "  Color Space: $($video.color_space)"
         Write-Host "  Color Transfer: $($video.color_transfer)"
         Write-Host "  Color Primaries: $($video.color_primaries)"
-        Write-Host "  Color Range: $($video.color_range)"
         
         # Check for HDR
-        $isHDR = $false
         if ($video.color_transfer -match "smpte2084|arib-std-b67") {
-            $isHDR = $true
-            Write-Good "HDR detected (Transfer: $($video.color_transfer))"
-        }
-        
-        # Check for Dolby Vision
-        $hasDolbyVision = $false
-        if ($video.side_data_list) {
-            foreach ($sideData in $video.side_data_list) {
-                if ($sideData.side_data_type -match "DOVI") {
-                    $hasDolbyVision = $true
-                    Write-Problem "DOLBY VISION detected - Known to cause playback issues on many devices!"
-                    Write-Host "    Profile: $($sideData.dv_profile)"
-                }
+            Write-Good "HDR video detected"
+            if ($video.color_transfer -eq "smpte2084") {
+                Write-Host "    HDR10/HDR10+ (PQ transfer function)"
+            } elseif ($video.color_transfer -eq "arib-std-b67") {
+                Write-Host "    HLG (Hybrid Log-Gamma)"
             }
         }
         
-        # Check pixel format for HDR compatibility
-        if ($isHDR -and $video.pix_fmt -notmatch "yuv420p10le|yuv422p10le|yuv444p10le") {
-            Write-Issue "HDR video with unusual pixel format: $($video.pix_fmt)"
+        # Check for problematic codecs
+        if ($video.codec_name -match "mpeg2video") {
+            Write-Issue "MPEG-2 video is outdated and inefficient. Consider re-encoding."
         }
-        
-        # B-frames and reference frames (requires frame analysis)
-        Write-Host ""
-        Write-ColorOutput "  Frame Analysis:" "White"
-        Write-Host "  Checking GOP structure (this may take a moment)..."
-        
-        # Get detailed frame info for first 1000 frames
-        $frameInfoJson = & $ffprobePath -v quiet -print_format json -show_frames -read_intervals "%+#1000" -select_streams v:$streamIndex "$InputFile" 2>&1
-        $frameInfo = ($frameInfoJson | ConvertFrom-Json).frames
-        
-        if ($frameInfo) {
-            $iFrames = @($frameInfo | Where-Object { $_.pict_type -eq "I" })
-            $pFrames = @($frameInfo | Where-Object { $_.pict_type -eq "P" })
-            $bFrames = @($frameInfo | Where-Object { $_.pict_type -eq "B" })
-            
-            Write-Host "  I-Frames: $($iFrames.Count)"
-            Write-Host "  P-Frames: $($pFrames.Count)"
-            Write-Host "  B-Frames: $($bFrames.Count)"
-            
-            if ($iFrames.Count -gt 0) {
-                $gopSize = [math]::Round(1000 / $iFrames.Count, 0)
-                Write-Host "  Estimated GOP Size: ~$gopSize frames"
-                
-                if ($gopSize -gt 300) {
-                    Write-Issue "Very large GOP size ($gopSize) may cause seeking issues in Plex."
-                }
-            }
-            
-            # Check for B-frame pyramid issues
-            if ($bFrames.Count -gt 0 -and $video.codec_name -eq "h264") {
-                Write-Host "  B-Frame Pyramid: Checking..."
-                # B-pyramid can cause issues with some hardware decoders
-                if ($video.profile -match "High") {
-                    Write-Issue "H.264 High Profile with B-frames may not decode on older devices."
-                }
-            }
-        } else {
-            Write-Host "  Unable to analyze frame structure"
+        if ($video.codec_name -eq "vc1") {
+            Write-Issue "VC-1 codec may require transcoding on some clients."
         }
         
         # Check for interlacing
         if ($video.field_order -and $video.field_order -ne "progressive") {
-            Write-Problem "INTERLACED video detected (Field Order: $($video.field_order))"
-            Write-Host "    Interlaced content should be deinterlaced for Plex."
+            Write-Issue "Video is interlaced ($($video.field_order)). May cause playback issues."
         } else {
             Write-Good "Progressive scan (not interlaced)"
         }
@@ -294,6 +437,10 @@ if ($videoStreams.Count -eq 0) {
             }
         }
     }
+    
+    # Perform HDR metadata validation on the first video stream
+    Test-HDRMetadata -VideoStream $videoStreams[0]
+
 }
 
 Write-Section "AUDIO STREAM ANALYSIS"
@@ -413,80 +560,84 @@ Write-Section "CONTAINER INTEGRITY CHECK"
 Write-Host "  Running FFmpeg validation..."
 Write-Host "  Note: For large files, this may take 1-2 minutes. Checking first 60 seconds only."
 
-# Fast validation - only check first 60 seconds and use hardware decoding if available
-# This catches most corruption issues without processing the entire file
-$validationOutput = & $ffmpegPath -v error -hwaccel auto -t 60 -i "$InputFile" -f null - 2>&1
+# Quick validation check - just check first 60 seconds
+$validationOutput = & $ffmpegPath -hwaccel auto -v error -t 60 -i "$InputFile" -f null - 2>&1
 
-if ($LASTEXITCODE -eq 0 -and -not $validationOutput) {
-    Write-Good "No container errors detected (first 60 seconds checked)"
-} else {
-    Write-Problem "Container errors detected:"
-    $validationOutput | ForEach-Object {
-        Write-Host "    $_" -ForegroundColor Red
+if ($validationOutput) {
+    $errorLines = $validationOutput -split "`n" | Where-Object { $_.Trim() -ne "" }
+    $errorCount = $errorLines.Count
+    Write-Problem "Container validation found $errorCount error(s):"
+    $errorLines | Select-Object -First 10 | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    if ($errorCount -gt 10) {
+        Write-Host "    ... and $($errorCount - 10) more error(s)" -ForegroundColor Yellow
     }
+} else {
+    Write-Good "No container errors detected (first 60 seconds checked)"
 }
 
 Write-Section "PLEX COMPATIBILITY SUMMARY"
 
-Write-Host ""
-$issueCount = 0
-
-# Compile issues
-Write-ColorOutput "  Critical Issues:" "Red"
+Write-Host "  Recommendations for optimal Plex playback:"
 Write-Host ""
 
-if ($videoStreams.Count -eq 0) {
-    Write-Host "    * No video streams found"
-    $issueCount++
+# Container recommendations
+if ($format.format.format_name -match "matroska") {
+    Write-Good "MKV container is excellent for Plex"
 }
-if ($hasDolbyVision) {
-    Write-Host "    * Dolby Vision present (major playback issues on most devices)"
-    $issueCount++
-}
-if ($videoStreams | Where-Object { $_.codec_name -eq "vc1" }) {
-    Write-Host "    * VC-1 codec (poor compatibility)"
-    $issueCount++
-}
-if ($videoStreams | Where-Object { $_.field_order -ne "progressive" -and $_.field_order }) {
-    Write-Host "    * Interlaced video (needs deinterlacing)"
-    $issueCount++
-}
-if ($validationOutput) {
-    Write-Host "    * Container integrity errors detected"
-    $issueCount++
-}
-
-if ($issueCount -eq 0) {
-    Write-Good "No critical issues found"
-}
-
-Write-Host ""
-Write-ColorOutput "  Recommendations:" "Yellow"
-Write-Host ""
-
-if ($hasDolbyVision) {
-    Write-Host "    * Remove Dolby Vision and keep HDR10/HDR10+"
-}
-if ($audioStreams | Where-Object { $_.codec_name -eq "truehd" }) {
-    Write-Host "    * Add AAC compatibility audio track alongside TrueHD"
-}
-if ($audioStreams | Where-Object { $_.codec_name -match "dts" }) {
-    Write-Host "    * Consider converting DTS to EAC3 or AAC"
-}
-if ($videoStreams | Where-Object { $_.field_order -ne "progressive" -and $_.field_order }) {
-    Write-Host "    * Deinterlace video before adding to Plex"
-}
-if ($subtitleStreams | Where-Object { $_.codec_name -eq "hdmv_pgs_subtitle" }) {
-    Write-Host "    * Consider extracting PGS subtitles or converting to SRT"
+if ($format.format.format_name -match "mov,mp4") {
+    Write-Good "MP4 container is excellent for Plex"
 }
 if ($format.format.format_name -match "avi|wmv|asf") {
     Write-Host "    * Remux to MKV or MP4 container"
 }
+
+# Video codec recommendations
+if ($videoStreams.Count -gt 0) {
+    $videoCodec = $videoStreams[0].codec_name
+    if ($videoCodec -match "h264|hevc|av1") {
+        Write-Good "Video codec is modern and efficient"
+    } else {
+        Write-Host "    * Consider re-encoding to H.264 or HEVC"
+    }
+}
+
+# Audio recommendations
+$hasCompatibleAudio = $false
+foreach ($audio in $audioStreams) {
+    if ($audio.codec_name -match "aac|ac3|eac3") {
+        $hasCompatibleAudio = $true
+        break
+    }
+}
+
+if (-not $hasCompatibleAudio) {
+    Write-Host "    * Add AAC or AC3 audio track for better compatibility"
+}
+
+# Subtitle recommendations
+if ($subtitleStreams | Where-Object { $_.codec_name -eq "hdmv_pgs_subtitle" }) {
+    Write-Host "    * Consider extracting PGS subtitles or converting to SRT"
+}
+
+# HDR metadata recommendations
+if ($videoStreams.Count -gt 0 -and $videoStreams[0].color_transfer -match "smpte2084|arib-std-b67") {
+    Write-Host ""
+    Write-ColorOutput "  HDR Content Recommendations:" "Yellow"
+    Write-Host "    * Ensure your Plex server supports HDR tone mapping"
+    Write-Host "    * Verify clients support HDR playback"
+    Write-Host "    * If HDR metadata validation failed, use the conversion script to fix"
+    Write-Host "    * HDR10+ may not survive Plex transcoding (converted to HDR10)"
+}
+
+# Container validation recommendations
 if ($validationOutput) {
+    Write-Host ""
     Write-Host "    * Container has errors - Remux/re-encode recommended"
     Write-Host "      Option 1: Use Dan's Plex Remux Script (handles all issues automatically)"
+    Write-Host "                Including HDR metadata validation and injection"
     Write-Host "                https://github.com/mridahodan/DansPersonalPlexRemuxScript"
     Write-Host "      Option 2: Manual remux with: ffmpeg -i input.mkv -c copy -map 0 output.mkv"
+    Write-Host "                Note: Manual remux will not fix HDR metadata issues"
 }
 
 Write-Host ""
