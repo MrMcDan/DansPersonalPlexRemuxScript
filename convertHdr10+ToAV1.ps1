@@ -6585,88 +6585,65 @@ function Invoke-EarlyDolbyVisionRemovalWithHDR10Plus {
         [double]$MaxAllowableDropPercent = 15.0
     )
     
-    # First, do comprehensive HDR10+ detection on original
-    Write-Host "`n=== Original File HDR10+ Analysis ===" -ForegroundColor Cyan
-    $originalHDR10Plus = Test-HDR10PlusInOriginal -FilePath $InputFile -Verbose $true
+    # FIX: Use cached HDR10+ detection results instead of re-detecting
+    Write-Host "`n=== Early Dolby Vision Processing ===" -ForegroundColor Cyan
     
     if (-not $VideoInfo.HasDolbyVision) {
         Write-Host "No Dolby Vision detected - skipping DV removal" -ForegroundColor Gray
-        Write-Host "Original HDR10+ status: $(if ($originalHDR10Plus.HasHDR10Plus) { 'PRESENT' } else { 'NOT FOUND' })" -ForegroundColor $(if ($originalHDR10Plus.HasHDR10Plus) { 'Green' } else { 'Yellow' })
+        Write-Host "HDR10+ status (cached): $(if ($Script:HDR10PlusStatus.HasHDR10Plus) { 'PRESENT' } else { 'NOT FOUND' })" -ForegroundColor $(if ($Script:HDR10PlusStatus.HasHDR10Plus) { 'Green' } else { 'Yellow' })
         return $InputFile
     }
     
-    Write-Host "`n=== Enhanced Dolby Vision Removal with HDR10+ Preservation ===" -ForegroundColor Yellow
-    Write-Host "Original file HDR10+ status: $(if ($originalHDR10Plus.HasHDR10Plus) { 'DETECTED' } else { 'NOT FOUND' })" -ForegroundColor $(if ($originalHDR10Plus.HasHDR10Plus) { 'Green' } else { 'Yellow' })
+    Write-Host "`n=== Enhanced Dolby Vision Removal ===" -ForegroundColor Cyan
+    Write-Host "HDR10+ status (cached): $(if ($Script:HDR10PlusStatus.HasHDR10Plus) { 'DETECTED' } else { 'NOT FOUND' })" -ForegroundColor $(if ($Script:HDR10PlusStatus.HasHDR10Plus) { 'Green' } else { 'Yellow' })
     
-    if (-not $originalHDR10Plus.HasHDR10Plus) {
-        Write-Host "No HDR10+ in original file - standard DV removal can proceed" -ForegroundColor Yellow
-        # Call your existing DV removal function
+    # Use cached detection - no need to re-detect
+    if (-not $Script:HDR10PlusStatus.HasHDR10Plus) {
+        Write-Host "No HDR10+ in file (from cached detection) - standard DV removal" -ForegroundColor Yellow
         return Invoke-EarlyDolbyVisionRemoval -InputFile $InputFile -VideoInfo $VideoInfo -MaxAllowableDropPercent $MaxAllowableDropPercent
     }
     
-    # If we have HDR10+, we need special handling
-    Write-Host "CRITICAL: File has both Dolby Vision AND HDR10+ - using preservation method" -ForegroundColor Yellow
-    
-    # Extract HDR10+ metadata BEFORE DV removal
-    $originalHDR10JsonPath = New-TempFile -BaseName "original_hdr10plus" -Extension ".json"
-    
-    Write-Host "Extracting HDR10+ metadata from original before DV removal..." -ForegroundColor Cyan
-    $extractSuccess = Invoke-HDR10PlusExtraction -InputFile $InputFile -OutputJson $originalHDR10JsonPath
-    if (-not $extractSuccess) {
-        Write-Warning "Failed to extract HDR10+ before encoding from current, trying original"
-        $extractSuccess = Invoke-HDR10PlusExtraction -InputFile $OrigFile -OutputJson $originalHDR10JsonPath
-    }
-    
-    if (-not $extractSuccess) {
-        Write-Warning "Failed to extract HDR10+ metadata - proceeding with standard DV removal"
-        return Invoke-EarlyDolbyVisionRemoval -InputFile $InputFile -VideoInfo $VideoInfo -MaxAllowableDropPercent $MaxAllowableDropPercent
-    }
+    # We have both DV and HDR10+ - the metadata was already extracted in Initialize-VideoAnalysisWithHDR10Plus
+    Write-Host "File has both Dolby Vision AND HDR10+ - using preservation method" -ForegroundColor Yellow
+    Write-Host "HDR10+ metadata already extracted: $($Script:HDR10PlusStatus.SceneCount) scenes" -ForegroundColor Green
     
     # Perform DV removal
     Write-Host "Performing Dolby Vision removal..." -ForegroundColor Yellow
     $dvRemovedFile = Invoke-EarlyDolbyVisionRemoval -InputFile $InputFile -VideoInfo $VideoInfo -MaxAllowableDropPercent $MaxAllowableDropPercent
     
     if ($dvRemovedFile -eq $InputFile) {
-        Write-Host "DV removal didn't change the file - HDR10+ should be preserved" -ForegroundColor Green
+        Write-Host "DV removal didn't change the file" -ForegroundColor Yellow
         return $InputFile
     }
     
-    # Verify HDR10+ is still present after DV removal
+    # Verify HDR10+ survived the DV removal process
     Write-Host "Verifying HDR10+ preservation after DV removal..." -ForegroundColor Cyan
     $postDVHDR10Plus = Test-HDR10PlusInOriginal -FilePath $dvRemovedFile -Verbose $false
     
     if ($postDVHDR10Plus.HasHDR10Plus) {
-        Write-Host "* HDR10+ metadata preserved through DV removal" -ForegroundColor Green
+        Write-Host "✓ HDR10+ metadata preserved through DV removal" -ForegroundColor Green
+        Write-Host "Using previously extracted metadata ($($Script:HDR10PlusStatus.SceneCount) scenes)" -ForegroundColor Green
         return $dvRemovedFile
     }
     else {
-        Write-Warning "HDR10+ metadata lost during DV removal - attempting restoration..."
+        Write-Warning "HDR10+ metadata lost during DV removal - re-extracting from DV-removed file..."
         
-        # Try to inject HDR10+ back into the DV-removed file
-        if (Test-Path $Config.HDR10PlusToolExe) {
-            $restoredFile = New-TempFile -BaseName "dv_removed_hdr10plus_restored" -Extension ([System.IO.Path]::GetExtension($dvRemovedFile))
-            
-            Write-Host "Injecting HDR10+ metadata back into DV-removed file..." -ForegroundColor Yellow
-            $injectSuccess = Invoke-HDR10PlusInjection -VideoFile $dvRemovedFile -JsonFile $originalHDR10JsonPath -OutputFile $restoredFile
-            
-            if ($injectSuccess) {
-                # Verify the injection worked
-                $restoredHDR10Plus = Test-HDR10PlusInOriginal -FilePath $restoredFile -Verbose $false
-                
-                if ($restoredHDR10Plus.HasHDR10Plus) {
-                    Write-Host "* HDR10+ metadata successfully restored after DV removal" -ForegroundColor Green
-                    return $restoredFile
-                }
-                else {
-                    Write-Warning "HDR10+ injection appeared to succeed but metadata not detected"
-                }
-            }
-            else {
-                Write-Warning "HDR10+ injection failed"
-            }
+        # Only if HDR10+ was lost, extract from the DV-removed file
+        $newJsonPath = New-TempFile -BaseName "dvremoved_hdr10plus" -Extension ".json"
+        $extractSuccess = Invoke-HDR10PlusExtraction -InputFile $dvRemovedFile -OutputJson $newJsonPath
+        
+        if ($extractSuccess) {
+            Write-Host "HDR10+ re-extracted from DV-removed file" -ForegroundColor Green
+            $Script:HDR10PlusStatus.ExtractedJsonPath = $newJsonPath
+            # Test viability of re-extracted metadata
+            $shouldSkip = Test-HDR10ProcessingViability -MetadataFilePath $newJsonPath -LogAssessment:$false
+            $Script:HDR10PlusStatus.IsViable = -not $shouldSkip
+        }
+        else {
+            Write-Warning "Could not re-extract HDR10+ - processing will continue without HDR10+"
+            $Script:HDR10PlusStatus.HasHDR10Plus = $false
         }
         
-        Write-Warning "Could not restore HDR10+ metadata - returning DV-removed file without HDR10+"
         return $dvRemovedFile
     }
 }
